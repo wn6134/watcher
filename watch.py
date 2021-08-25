@@ -151,11 +151,11 @@ class Watcher:
             raw_reply = StringIO()
             reply = ping(host, count=1, verbose=True, out=raw_reply)
             if reply.success():
-                self._log(f'Ping test {host} OK', LogLevel.INFO)
+                self._log(f'{host} PING OK', LogLevel.INFO)
             else:
-                self._log(f'Ping test {host} BAD: {raw_reply.getvalue().strip()}', LogLevel.WARNING)
+                self._log(f'{host} PING BAD: {raw_reply.getvalue().strip()}', LogLevel.WARNING)
         except Exception as e:
-            self._log(f'Ping test {host} FAILED: {e}', LogLevel.ERROR)
+            self._log(f'{host} PING FAILED: {e}', LogLevel.ERROR)
 
     def _check_http(self, host):
         try:
@@ -163,11 +163,11 @@ class Watcher:
             http.mount("http://", self._http_adapter)
             status_code = http.get('http://' + host, timeout=self._http_timeout).status_code
             if status_code == 200:
-                self._log(f'HTTP test {host} OK', LogLevel.INFO)
+                self._log(f'{host} HTTP OK', LogLevel.INFO)
             else:
-                self._log(f'HTTP test {host} BAD: status code {status_code}', LogLevel.WARNING)
+                self._log(f'{host} HTTP BAD: status code {status_code}', LogLevel.WARNING)
         except Exception as e:
-            self._log(f'HTTP test {host} FAILED: {e}', LogLevel.ERROR)
+            self._log(f'{host} HTTP FAILED: {e}', LogLevel.ERROR)
 
     def _check_https(self, host):
         try:
@@ -175,11 +175,11 @@ class Watcher:
             https.mount("https://", self._http_adapter)
             status_code = https.get('https://' + host, timeout=self._http_timeout).status_code
             if status_code == 200:
-                self._log(f'HTTPS test {host} OK', LogLevel.INFO)
+                self._log(f'{host} HTTPS OK', LogLevel.INFO)
             else:
-                self._log(f'HTTPS test {host} BAD: status code {status_code}', LogLevel.WARNING)
+                self._log(f'{host} HTTPS BAD: status code {status_code}', LogLevel.WARNING)
         except Exception as e:
-            self._log(f'HTTPS test {host} FAILED: {e}', LogLevel.ERROR)
+            self._log(f'{host} HTTPS FAILED: {e}', LogLevel.ERROR)
 
     def _log(self, message, level=LogLevel.INFO, mail=None):
         formatted_message = self._format_message(message, level)
