@@ -11,6 +11,11 @@ To install python packages execute:
 pip3 install requests pythonping
 ```
 
+Copy **watch.sample.ini** to **watch.ini**.
+```
+cp watch.sample.ini watch.ini
+```
+
 Edit **watch.ini**. Follow hints in comments.
 
 Run script:
