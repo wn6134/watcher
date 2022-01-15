@@ -9,6 +9,10 @@ from time import sleep
 import requests
 from pythonping import ping
 from requests.adapters import HTTPAdapter, Retry
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
+
+CONFIG_FILENAME = 'watch.ini'
 
 
 class LogLevel:
@@ -80,8 +84,7 @@ class Config:
     def ok_mail_silent_checks(self):
         return self._ok_mail_silent_checks
 
-    @classmethod
-    def from_file(cls, path_to_config):
+    def from_file(self, path_to_config):
         if not os.path.isfile(path_to_config):
             raise Exception(f'"{path_to_config}" is not a file')
         config = configparser.ConfigParser()
@@ -89,26 +92,27 @@ class Config:
         if 'watch' not in config:
             raise Exception(f'Mandatory section "watch" absent in "{path_to_config}"')
         watch = config['watch']
-        args = {}
         if 'ping-list' in watch:
-            args.update(ping_list=cls._parse_list_from_string(watch['ping-list']))
+            self._ping_list = self._parse_list_from_string(watch['ping-list'])
         if 'http-list' in watch:
-            args.update(http_list=cls._parse_list_from_string(watch['http-list']))
+            self._http_list = self._parse_list_from_string(watch['http-list'])
         if 'https-list' in watch:
-            args.update(https_list=cls._parse_list_from_string(watch['https-list']))
+            self._https_list = self._parse_list_from_string(watch['https-list'])
         if 'timeout' in watch:
-            args.update(timeout=watch.getint('timeout'))
+            self._timeout = watch.getint('timeout')
         if 'mail-to' in watch:
-            args.update(mail_to=watch['mail-to'])
+            self._mail_to = watch['mail-to']
         if 'mail-from' in watch:
-            args.update(mail_from=watch['mail-from'])
+            self._mail_from = watch['mail-from']
         if 'mail-levels-list' in watch:
-            args.update(mail_levels_list=[
-                item.upper() for item in cls._parse_list_from_string(watch['mail-levels-list'])
-            ])
+            self._mail_levels_list = [
+                item.upper() for item in self._parse_list_from_string(watch['mail-levels-list'])
+            ]
         if 'ok-mail-silent-checks' in watch:
-            args.update(ok_mail_silent_checks=watch.getint('ok-mail-silent-checks'))
-        return cls(**args)
+            self._ok_mail_silent_checks = watch.getint('ok-mail-silent-checks')
+
+    def no_hosts_defined(self):
+        return len(self.ping_list) == 0 and len(self.http_list) == 0 and len(self.https_list) == 0
 
     @staticmethod
     def _parse_list_from_string(string):
@@ -116,35 +120,67 @@ class Config:
 
 
 class Watcher:
+    _config_file = None
     _config = None
     _ok_checks = 0
     _http_timeout = 30
-    _http_adapter = HTTPAdapter(
-        max_retries=Retry(
-            total=1
-        )
-    )
+    _http_adapter = HTTPAdapter(max_retries=Retry(total=1))
+    _observer = None
 
-    def __init__(self, config):
-        self._config = config
+    def __init__(self, config_filename=CONFIG_FILENAME):
+        self._config_file = config_filename
+        self._config = Config()
+
+        def _read_config():
+            self._config.from_file(self._config_file)
+
+        _read_config()
+
+        def _log(message):
+            self._log(message, mail=False)
+
+        class _CustomHandler(FileSystemEventHandler):
+            _last_event_time = 0
+
+            def on_modified(self, event):
+                super(_CustomHandler, self).on_modified(event)
+
+                event_time = round(datetime.datetime.now().timestamp())
+                if event.is_directory or event_time - self._last_event_time < 1:
+                    return
+
+                self._last_event_time = event_time
+                _log(event_time)
+                _log(event)
+                _read_config()
+                _log('Config was updated')
+
+        event_handler = _CustomHandler()
+        self._observer = Observer()
+        self._observer.schedule(event_handler, path=self._config_file, recursive=False)
+        self._observer.start()
 
     def watch(self):
-        if len(self._config.ping_list) == 0 and len(self._config.http_list) == 0 and len(self._config.https_list) == 0:
+        if self._config.no_hosts_defined():
             self._log('Hosts for check are not set', LogLevel.WARNING)
             exit(0)
-        while True:
-            for host in self._config.ping_list:
-                self._check_ping(host)
-            for host in self._config.http_list:
-                self._check_http(host)
-            for host in self._config.https_list:
-                self._check_https(host)
-            sleep(self._config.timeout)
-            if self._config.ok_mail_silent_checks > 0:
-                self._ok_checks += 1
-                if self._ok_checks >= self._config.ok_mail_silent_checks:
-                    self._log('All tests OK', mail=True)
-                    self._ok_checks = 0
+        try:
+            while True:
+                for host in self._config.ping_list:
+                    self._check_ping(host)
+                for host in self._config.http_list:
+                    self._check_http(host)
+                for host in self._config.https_list:
+                    self._check_https(host)
+                if self._config.ok_mail_silent_checks > 0:
+                    self._ok_checks += 1
+                    if self._ok_checks >= self._config.ok_mail_silent_checks:
+                        self._log('All tests OK', mail=True)
+                        self._ok_checks = 0
+                sleep(self._config.timeout)
+        except KeyboardInterrupt:
+            self._observer.stop()
+        self._observer.join()
 
     def _check_ping(self, host):
         try:
@@ -184,11 +220,11 @@ class Watcher:
     def _log(self, message, level=LogLevel.INFO, mail=None):
         formatted_message = self._format_message(message, level)
         print(formatted_message)
-        if self._config.mail_to is not None and (
-                mail is True or (mail is None and level in self._config.mail_levels_list)
-        ):
+        if self._config.mail_to is None or mail is False:
+            return
+        if level in self._config.mail_levels_list:
             self._mail(message, formatted_message)
-            self._ok_checks = -1
+            self._ok_checks = 0
 
     @staticmethod
     def _format_message(message, level=LogLevel.INFO):
@@ -207,5 +243,4 @@ class Watcher:
 
 
 if __name__ == '__main__':
-    configuration = Config.from_file('watch.ini')
-    Watcher(configuration).watch()
+    Watcher().watch()

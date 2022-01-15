@@ -5,10 +5,11 @@ Requirements:
    * python packages: 
      * requests 
      * pythonping
+     * watchdog
        
 To install python packages execute:
 ```
-pip3 install requests pythonping
+pip3 install requests pythonping watchdog
 ```
 
 Copy **watch.sample.ini** to **watch.ini**.
