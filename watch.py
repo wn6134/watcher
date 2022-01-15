@@ -120,42 +120,32 @@ class Config:
 
 
 class Watcher:
-    _config_file = None
+    _config_filename = None
     _config = None
     _ok_checks = 0
     _http_timeout = 30
     _http_adapter = HTTPAdapter(max_retries=Retry(total=1))
     _observer = None
+    _config_update_required = False
 
     def __init__(self, config_filename=CONFIG_FILENAME):
-        self._config_file = config_filename
+        self._config_filename = config_filename
         self._config = Config()
+        self._config.from_file(self._config_filename)
 
-        def _read_config():
-            self._config.from_file(self._config_file)
-
-        _read_config()
-
-        def _log(message):
-            self._log(message, mail=False)
+        def _update_required():
+            self._config_update_required = True
 
         class _CustomHandler(FileSystemEventHandler):
-            _last_event_time = 0
-
             def on_modified(self, event):
                 super(_CustomHandler, self).on_modified(event)
 
-                event_time = round(datetime.datetime.now().timestamp())
-                if event.is_directory or event_time - self._last_event_time < 1:
-                    return
-
-                self._last_event_time = event_time
-                _read_config()
-                _log('Config was updated')
+                if not event.is_directory:
+                    _update_required()
 
         event_handler = _CustomHandler()
         self._observer = Observer()
-        self._observer.schedule(event_handler, path=self._config_file, recursive=False)
+        self._observer.schedule(event_handler, path=self._config_filename, recursive=False)
         self._observer.start()
 
     def watch(self):
@@ -164,6 +154,10 @@ class Watcher:
             exit(0)
         try:
             while True:
+                if self._config_update_required:
+                    self._config.from_file(self._config_filename)
+                    self._log('Config was updated', level=LogLevel.DEBUG)
+                    self._config_update_required = False
                 for host in self._config.ping_list:
                     self._check_ping(host)
                 for host in self._config.http_list:
@@ -218,9 +212,9 @@ class Watcher:
     def _log(self, message, level=LogLevel.INFO, mail=None):
         formatted_message = self._format_message(message, level)
         print(formatted_message)
-        if self._config.mail_to is None or mail is False:
+        if self._config.mail_to is None:
             return
-        if level in self._config.mail_levels_list:
+        if mail or level in self._config.mail_levels_list:
             self._mail(message, formatted_message)
             self._ok_checks = 0
 
