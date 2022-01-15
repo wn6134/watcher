@@ -150,8 +150,6 @@ class Watcher:
                     return
 
                 self._last_event_time = event_time
-                _log(event_time)
-                _log(event)
                 _read_config()
                 _log('Config was updated')
 
