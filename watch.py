@@ -12,8 +12,6 @@ from requests.adapters import HTTPAdapter, Retry
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-CONFIG_FILENAME = 'watch.ini'
-
 
 class LogLevel:
     DEBUG = 'DEBUG'
@@ -22,35 +20,50 @@ class LogLevel:
     ERROR = 'ERROR'
 
 
-class Config:
-    _ping_list = None
-    _http_list = None
-    _https_list = None
-    _timeout = None
-    _mail_to = None
-    _mail_from = None
-    _mail_levels_list = None
-    _ok_mail_silent_checks = None
+class Result:
+    OK = 'OK'
+    BAD = 'BAD'
+    FAIL = 'FAIL'
 
+
+class CheckResult:
+    def __init__(self, host, check_type, result, details=None):
+        self._host = host
+        self._check_type = check_type
+        self._result = result
+        self._details = details
+
+    @property
+    def host(self):
+        return self._host
+
+    @property
+    def check_type(self):
+        return self._check_type
+
+    @property
+    def result(self):
+        return self._result
+
+    @property
+    def details(self):
+        return self._details
+
+
+class Config:
     def __init__(self,
-                 ping_list=None,
-                 http_list=None,
-                 https_list=None,
-                 timeout=None,
-                 mail_to=None,
-                 mail_from=None,
-                 mail_levels_list=None,
-                 ok_mail_silent_checks=None
+                 ping_list=None, http_list=None, https_list=None, timeout=30,
+                 mail_to=None, mail_from='report@watcher.tld', mail_levels_list=None, mail_after_ok_checks=0
                  ):
         self._ping_list = ping_list if ping_list is not None else []
         self._http_list = http_list if http_list is not None else []
         self._https_list = https_list if https_list is not None else []
-        self._timeout = timeout if timeout is not None else 60
+        self._timeout = timeout
         self._mail_to = mail_to
-        self._mail_from = mail_from if mail_from is not None else 'report@watcher.tld'
+        self._mail_from = mail_from
         self._mail_levels_list = mail_levels_list \
             if mail_levels_list is not None else [LogLevel.WARNING, LogLevel.ERROR]
-        self._ok_mail_silent_checks = ok_mail_silent_checks if ok_mail_silent_checks is not None else 0
+        self._mail_after_ok_checks = mail_after_ok_checks
 
     @property
     def ping_list(self):
@@ -81,8 +94,8 @@ class Config:
         return self._mail_levels_list
 
     @property
-    def ok_mail_silent_checks(self):
-        return self._ok_mail_silent_checks
+    def mail_after_ok_checks(self):
+        return self._mail_after_ok_checks
 
     def from_file(self, path_to_config):
         if not os.path.isfile(path_to_config):
@@ -108,8 +121,8 @@ class Config:
             self._mail_levels_list = [
                 item.upper() for item in self._parse_list_from_string(watch['mail-levels-list'])
             ]
-        if 'ok-mail-silent-checks' in watch:
-            self._ok_mail_silent_checks = watch.getint('ok-mail-silent-checks')
+        if 'mail-after-ok-checks' in watch:
+            self._mail_after_ok_checks = watch.getint('mail-after-ok-checks')
 
     def no_hosts_defined(self):
         return len(self.ping_list) == 0 and len(self.http_list) == 0 and len(self.https_list) == 0
@@ -120,18 +133,16 @@ class Config:
 
 
 class Watcher:
-    _config_filename = None
-    _config = None
-    _ok_checks = 0
-    _http_timeout = 30
-    _http_adapter = HTTPAdapter(max_retries=Retry(total=1))
-    _observer = None
-    _config_update_required = False
-
-    def __init__(self, config_filename=CONFIG_FILENAME):
+    def __init__(self, config_filename):
         self._config_filename = config_filename
+
         self._config = Config()
         self._config.from_file(self._config_filename)
+        if self._config.no_hosts_defined():
+            self._log('Hosts for check are not set', LogLevel.WARNING)
+            exit(1)
+
+        self._config_update_required = False
 
         def _update_required():
             self._config_update_required = True
@@ -148,91 +159,142 @@ class Watcher:
         self._observer.schedule(event_handler, path=self._config_filename, recursive=False)
         self._observer.start()
 
+        self._http_adapter = HTTPAdapter(max_retries=Retry(total=1))
+
+        self._ok_checks = 0
+
     def watch(self):
-        if self._config.no_hosts_defined():
-            self._log('Hosts for check are not set', LogLevel.WARNING)
-            exit(0)
         try:
             while True:
                 if self._config_update_required:
                     self._config.from_file(self._config_filename)
-                    self._log('Config was updated', level=LogLevel.DEBUG)
+                    message = 'Config was updated'
+                    self._log(message)
+                    body = f'''Date/time: {get_datetime()}
+Result: {message}
+{self._format_config()}
+'''
+                    self._mail(message, body)
                     self._config_update_required = False
+
                 for host in self._config.ping_list:
-                    self._check_ping(host)
+                    self._submit_result(
+                        self._check_ping(host)
+                    )
                 for host in self._config.http_list:
-                    self._check_http(host)
+                    self._submit_result(
+                        self._check_http(host, adapter=self._http_adapter, timeout=self._config.timeout, https=False)
+                    )
                 for host in self._config.https_list:
-                    self._check_https(host)
-                if self._config.ok_mail_silent_checks > 0:
+                    self._submit_result(
+                        self._check_http(host, adapter=self._http_adapter, timeout=self._config.timeout)
+                    )
+
+                if self._config.mail_after_ok_checks > 0:
                     self._ok_checks += 1
-                    if self._ok_checks >= self._config.ok_mail_silent_checks:
-                        self._log('All tests OK', mail=True)
+                    if self._ok_checks >= self._config.mail_after_ok_checks:
+                        message = 'All tests OK'
+                        self._log(message)
+                        body = f'''Date/time: {get_datetime()}
+Result: {message}
+{self._format_config()}
+'''
+                        self._mail(message, body)
                         self._ok_checks = 0
                 sleep(self._config.timeout)
         except KeyboardInterrupt:
             self._observer.stop()
         self._observer.join()
 
-    def _check_ping(self, host):
+    def _format_config(self):
+        return f'''Ping list: {', '.join([host for host in self._config.ping_list])}
+HTTP list: {', '.join([host for host in self._config.http_list])}
+HTTPS list: {', '.join([host for host in self._config.https_list])}
+Timeout: {self._config.timeout}
+Mail levels: {', '.join([level for level in self._config.mail_levels_list])}
+Mail after OK checks: {self._config.mail_after_ok_checks}'''
+
+    @staticmethod
+    def _check_ping(host):
+        check_type = 'PING'
         try:
             raw_reply = StringIO()
             reply = ping(host, count=1, verbose=True, out=raw_reply)
             if reply.success():
-                self._log(f'{host} PING OK', LogLevel.INFO)
+                return CheckResult(host, check_type, Result.OK)
             else:
-                self._log(f'{host} PING BAD: {raw_reply.getvalue().strip()}', LogLevel.WARNING)
+                details = raw_reply.getvalue().strip()
+                return CheckResult(host, check_type, Result.BAD, details)
         except Exception as e:
-            self._log(f'{host} PING FAILED: {e}', LogLevel.ERROR)
-
-    def _check_http(self, host):
-        try:
-            http = requests.Session()
-            http.mount("http://", self._http_adapter)
-            status_code = http.get('http://' + host, timeout=self._http_timeout).status_code
-            if status_code == 200:
-                self._log(f'{host} HTTP OK', LogLevel.INFO)
-            else:
-                self._log(f'{host} HTTP BAD: status code {status_code}', LogLevel.WARNING)
-        except Exception as e:
-            self._log(f'{host} HTTP FAILED: {e}', LogLevel.ERROR)
-
-    def _check_https(self, host):
-        try:
-            https = requests.Session()
-            https.mount("https://", self._http_adapter)
-            status_code = https.get('https://' + host, timeout=self._http_timeout).status_code
-            if status_code == 200:
-                self._log(f'{host} HTTPS OK', LogLevel.INFO)
-            else:
-                self._log(f'{host} HTTPS BAD: status code {status_code}', LogLevel.WARNING)
-        except Exception as e:
-            self._log(f'{host} HTTPS FAILED: {e}', LogLevel.ERROR)
-
-    def _log(self, message, level=LogLevel.INFO, mail=None):
-        formatted_message = self._format_message(message, level)
-        print(formatted_message)
-        if self._config.mail_to is None:
-            return
-        if mail or level in self._config.mail_levels_list:
-            self._mail(message, formatted_message)
-            self._ok_checks = 0
+            return CheckResult(host, check_type, Result.FAIL, f'{e}')
 
     @staticmethod
-    def _format_message(message, level=LogLevel.INFO):
-        return f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} [{level}] {message}"
+    def _check_http(host, adapter=None, timeout=30, https=True):
+        if adapter is None:
+            adapter = HTTPAdapter(max_retries=Retry(total=1))
+        check_type = 'HTTPS'
+        prefix = 'https://'
+        if not https:
+            check_type = 'HTTP'
+            prefix = 'http://'
+        try:
+            http = requests.Session()
+            http.mount(prefix, adapter)
+            status_code = http.get(prefix + host, timeout=timeout).status_code
+            if status_code == 200:
+                return CheckResult(host, check_type, Result.OK)
+            else:
+                details = f'status code {status_code}'
+                return CheckResult(host, check_type, Result.BAD, details)
+        except Exception as e:
+            return CheckResult(host, check_type, Result.FAIL, f'{e}')
+
+    def _submit_result(self, result, mail=None):
+        if result.result in [Result.BAD, Result.FAIL]:
+            self._ok_checks = 0
+        level = LogLevel.INFO
+        if result.result == Result.BAD:
+            level = LogLevel.WARNING
+        if result.result == Result.FAIL:
+            level = LogLevel.ERROR
+        message = full_message = result.host + ' ' + result.check_type + ' ' + result.result
+        if result.details:
+            full_message += ': ' + result.details
+        self._log(full_message, level=level)
+        
+        if self._config.mail_to is None or mail is False:
+            return
+        if mail or level in self._config.mail_levels_list:
+            details = ''
+            if result.details:
+                details = f'Details: {result.details}'
+            body = f'''Date/time: {get_datetime()}
+Host: {result.host} 
+Check type: {result.check_type}
+Result: {result.result}
+{details}
+'''
+            self._mail(message, body)
+
+    @staticmethod
+    def _log(message, level=LogLevel.INFO):
+        print(f'{get_datetime()} [{level}] {message}')
 
     def _mail(self, subject, body):
         try:
             msg = MIMEText(body)
-            msg["To"] = self._config.mail_to
-            msg["From"] = self._config.mail_from
-            msg["Subject"] = subject
-            p = Popen(["/usr/sbin/sendmail", "-t", "-oi"], stdin=PIPE)
+            msg['To'] = self._config.mail_to
+            msg['From'] = self._config.mail_from
+            msg['Subject'] = subject
+            p = Popen(['/usr/sbin/sendmail', '-t', '-oi'], stdin=PIPE)
             p.communicate(msg.as_bytes())
         except Exception as e:
-            self._log(f'Failed to send mail: {e}', LogLevel.ERROR, mail=True)
+            self._log(f'Failed to send mail: {e}', LogLevel.ERROR)
+
+
+def get_datetime():
+    return datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 
 if __name__ == '__main__':
-    Watcher().watch()
+    Watcher('watch.ini').watch()
